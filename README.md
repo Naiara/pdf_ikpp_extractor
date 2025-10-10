@@ -1,6 +1,6 @@
 # PDF extractor for cursos formativos
 
-Minimal app that extracts center name, center code, course name and participants (DNI + result) from textual PDFs in Spanish or Basque.
+Minimal app that extracts school_name, school_id, course_name and participants (student_id + qualified) from textual PDFs in Spanish or Basque.
 
 Build image:
 
@@ -36,5 +36,19 @@ git commit -m "Initial import: pdf extractor service"
 # add remote and push
 git remote add origin <your-remote-url>
 git push -u origin main
+```
+
+Sample JSON output (fields renamed):
+
+```json
+{
+	"school_name": "CIFP GURE ESKOLA LHII",
+	"school_id": "0976431",
+	"course_name": "N8N HASTAPENAK",
+	"participants": [
+		{"row_id": 1, "student_id": "62949881P", "qualified": true},
+		{"row_id": 2, "student_id": "19517997J", "qualified": true}
+	]
+}
 ```
 

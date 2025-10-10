@@ -55,8 +55,8 @@ def extract_from_pdf(path: str) -> Dict:
     lines = [ln.strip() for ln in full_text.splitlines() if ln.strip()]
 
     result = {
-        "center_name": None,
-        "center_code": None,
+        "school_name": None,
+        "school_id": None,
         "course_name": None,
         "participants": []
     }
@@ -76,11 +76,11 @@ def extract_from_pdf(path: str) -> Dict:
         if label_center_es in low or label_center_eu in low:
             # split on ':' and take remainder
             if ':' in ln:
-                result['center_name'] = ln.split(':', 1)[1].strip()
+                result['school_name'] = ln.split(':', 1)[1].strip()
             else:
                 # value might be next line
                 if i + 1 < len(lines):
-                    result['center_name'] = lines[i + 1].strip()
+                    result['school_name'] = lines[i + 1].strip()
         # center code
         if label_code_es in low or label_code_eu in low or 'codigo de centro' in low:
             if ':' in ln:
@@ -88,14 +88,14 @@ def extract_from_pdf(path: str) -> Dict:
                 after = ln.split(':', 1)[1].strip()
                 m = re.search(r"(\d{4,})", after)
                 if m:
-                    result['center_code'] = m.group(1)
+                    result['school_id'] = m.group(1)
                 else:
-                    result['center_code'] = after.split()[0] if after.split() else None
+                    result['school_id'] = after.split()[0] if after.split() else None
             else:
                 if i + 1 < len(lines):
                     m = re.search(r"(\d{4,})", lines[i + 1])
                     if m:
-                        result['center_code'] = m.group(1)
+                        result['school_id'] = m.group(1)
         # course name
         if label_course_es in low or label_course_eu in low:
             if ':' in ln:
@@ -125,15 +125,15 @@ def extract_from_pdf(path: str) -> Dict:
             # if line contains a DNI, parse it
             m = dni_re.search(ln)
             if m:
-                dni = _clean_dni(m.group(0))
+                student_id = _clean_dni(m.group(0))
                 # look for result in the same line (Apto/No apto/Gai/Ez gai)
-                res = None
+                qualified = None
                 if re.search(r"\b(apto|no apto|noapto)\b", ln, flags=re.IGNORECASE):
                     match = re.search(r"\b(no apto|noapto|apto)\b", ln, flags=re.IGNORECASE).group(1)
-                    res = _normalize_result(match)
+                    qualified = _normalize_result(match)
                 elif re.search(r"\b(gai|ez gai|ezgai)\b", ln, flags=re.IGNORECASE):
                     match = re.search(r"\b(ez gai|ezgai|gai)\b", ln, flags=re.IGNORECASE).group(1)
-                    res = _normalize_result(match)
+                    qualified = _normalize_result(match)
                 else:
                     # maybe result is at the end after multiple spaces; try last token
                     parts = ln.split()
@@ -141,10 +141,13 @@ def extract_from_pdf(path: str) -> Dict:
                         possible = parts[-1]
                         r = _normalize_result(possible)
                         if r is not None:
-                            res = r
+                            qualified = r
 
-                participants.append({"dni": dni, "result": res})
+                participants.append({"student_id": student_id, "qualified": qualified})
 
+    # assign row_id sequentially starting at 1
+    for idx, p in enumerate(participants, start=1):
+        p['row_id'] = idx
     result['participants'] = participants
 
     return result
