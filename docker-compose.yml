@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  pdf-extractor:
+    build: .
+    image: pdf-extractor:latest
+    environment:
+      - PORT=8083
+    ports:
+      - "8083:8083"
+    restart: unless-stopped
+    # optional: mount the workspace so you can change code without rebuilding
+    # volumes:
+    #   - ./:/app
