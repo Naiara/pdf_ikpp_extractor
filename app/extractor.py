@@ -120,30 +120,41 @@ def extract_from_pdf(path: str) -> Dict:
 
     participants: List[Dict] = []
     if start_idx is not None:
-        for ln in lines[start_idx:]:
+        # iterate with index so we can peek following lines when rows are split
+        for idx in range(start_idx, len(lines)):
+            ln = lines[idx]
             # stop if we hit a likely footer or blank
             if ln.lower().startswith('yo,') or ln.lower().startswith('firma'):
                 break
-            # if line contains a DNI, parse it
             m = dni_re.search(ln)
             if m:
                 student_id = _clean_dni(m.group(0))
                 # look for result in the same line (Apto/No apto/Gai/Ez gai)
                 qualified = None
+                # spanish apto/no apto
                 if re.search(r"\b(apto|no apto|noapto)\b", ln, flags=re.IGNORECASE):
                     match = re.search(r"\b(no apto|noapto|apto)\b", ln, flags=re.IGNORECASE).group(1)
                     qualified = _normalize_result(match)
-                elif re.search(r"\b(gai|ez gai|ezgai)\b", ln, flags=re.IGNORECASE):
-                    match = re.search(r"\b(ez gai|ezgai|gai)\b", ln, flags=re.IGNORECASE).group(1)
-                    qualified = _normalize_result(match)
                 else:
-                    # maybe result is at the end after multiple spaces; try last token
-                    parts = ln.split()
-                    if parts:
-                        possible = parts[-1]
-                        r = _normalize_result(possible)
-                        if r is not None:
-                            qualified = r
+                    # basque variants: allow 'ez-gai', 'ez gai', 'gai'
+                    m_gai = re.search(r"\b(ez[-\s]?gai|gai)\b", ln, flags=re.IGNORECASE)
+                    if m_gai:
+                        qualified = _normalize_result(m_gai.group(1))
+                    else:
+                        # maybe the qualification is in the following 1-2 lines (rows split)
+                        for look_ahead in (1, 2):
+                            next_idx = idx + look_ahead
+                            if next_idx < len(lines):
+                                nxt = lines[next_idx]
+                                # check for gai/ez-gai or apto/no apto in next line
+                                m_gai2 = re.search(r"\b(ez[-\s]?gai|gai)\b", nxt, flags=re.IGNORECASE)
+                                if m_gai2:
+                                    qualified = _normalize_result(m_gai2.group(1))
+                                    break
+                                m_sp = re.search(r"\b(no apto|noapto|apto)\b", nxt, flags=re.IGNORECASE)
+                                if m_sp:
+                                    qualified = _normalize_result(m_sp.group(1))
+                                    break
 
                 participants.append({"student_id": student_id, "qualified": qualified})
 
