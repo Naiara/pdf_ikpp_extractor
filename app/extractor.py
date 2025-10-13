@@ -40,6 +40,76 @@ def _normalize_result(value: str) -> Optional[bool]:
     return None
 
 
+def parse_participants_from_lines(lines: List[str], start_idx: int) -> List[Dict]:
+    """Parse participants from pre-split lines starting at start_idx.
+
+    This helper merges up to 2 following lines when a row is split so rows
+    aren't counted twice.
+    """
+    participants: List[Dict] = []
+    idx = start_idx
+    while idx < len(lines):
+        ln = lines[idx]
+        # stop if we hit a likely footer or signature
+        if ln.lower().startswith('yo,') or ln.lower().startswith('firma'):
+            break
+
+        m = dni_re.search(ln)
+        if m:
+            student_id = _clean_dni(m.group(0))
+            qualified = None
+            m_qual = re.search(r"\b(ez[-\s]?gai|gai|no apto|noapto|apto)\b\s*$", ln, flags=re.IGNORECASE)
+            consumed = 0
+            if m_qual:
+                qualified = _normalize_result(m_qual.group(1))
+                consumed = 1
+            else:
+                # Try merging with the next 1-2 lines in case the row was split by linebreaks
+                for look_ahead in (1, 2):
+                    next_idx = idx + look_ahead
+                    if next_idx < len(lines):
+                        combined = ln + " " + lines[next_idx]
+                        m_qual2 = re.search(r"\b(ez[-\s]?gai|gai|no apto|noapto|apto)\b\s*$", combined, flags=re.IGNORECASE)
+                        if m_qual2:
+                            qualified = _normalize_result(m_qual2.group(1))
+                            consumed = 1 + look_ahead
+                            break
+
+            participants.append({"student_id": student_id, "qualified": qualified})
+            # advance index by number of consumed lines (at least 1)
+            if consumed > 0:
+                idx += consumed
+                continue
+        idx += 1
+
+    return participants
+
+
+def parse_participants_from_table(table: List[List[str]]) -> List[Dict]:
+    """Parse participants from a table (list of rows, each row is list of cell texts).
+
+    Heuristic: join cells with space and treat that as the row text. Then extract
+    the DNI token and qualification (expected at end of the joined row).
+    """
+    participants: List[Dict] = []
+    for row in table:
+        row_text = " ".join(cell.strip() for cell in row if cell and cell.strip())
+        if not row_text:
+            continue
+        m = dni_re.search(row_text)
+        if m:
+            student_id = _clean_dni(m.group(0))
+            m_qual = re.search(r"\b(ez[-\s]?gai|gai|no apto|noapto|apto)\b\s*$", row_text, flags=re.IGNORECASE)
+            qualified = _normalize_result(m_qual.group(1)) if m_qual else None
+            participants.append({"student_id": student_id, "qualified": qualified})
+    return participants
+
+
+# Module-level permissive DNI token extractor (used by parsing helpers)
+# Accept alphanumeric tokens (and hyphens) of length 5-12 that contain at least one digit.
+dni_re = re.compile(r"\b(?=[A-Za-z0-9-]{5,12}\b)(?=[A-Za-z0-9-]*\d)[A-Za-z0-9-]{5,12}\b")
+
+
 def extract_from_pdf(path: str) -> Dict:
     """Extract required fields from text PDF and return dict.
 
@@ -49,9 +119,24 @@ def extract_from_pdf(path: str) -> Dict:
     - Find participants section and collect lines that contain a DNI; from each such line extract DNI and result.
     """
     pages_text: List[str] = []
+    # store per-page lines to map header location to a page
+    pages_lines_list: List[List[str]] = []
+    # store tables along with the page index where they were found
+    tables_found: List[tuple] = []  # list of (page_index, table)
     with pdfplumber.open(path) as pdf:
-        for p in pdf.pages:
-            pages_text.append(p.extract_text() or "")
+        for p_idx, p in enumerate(pdf.pages):
+            text = p.extract_text() or ""
+            pages_text.append(text)
+            page_lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            pages_lines_list.append(page_lines)
+            try:
+                page_tables = p.extract_tables() or []
+                for t in page_tables:
+                    norm = [[cell or "" for cell in row] for row in t]
+                    tables_found.append((p_idx, norm))
+            except Exception:
+                # ignore table extraction errors
+                pass
 
     full_text = "\n".join(pages_text)
     lines = [ln.strip() for ln in full_text.splitlines() if ln.strip()]
@@ -116,47 +201,44 @@ def extract_from_pdf(path: str) -> Dict:
             start_idx = idx + 1
             break
 
-    dni_re = re.compile(r"\b\d{7,8}[A-Za-z0-9]\b")
-
+    # Use module-level `dni_re` (permissive token extractor). Try parsing from
+    # detected tables first because table rows map 1:1 to logical rows.
     participants: List[Dict] = []
-    if start_idx is not None:
-        # iterate with index so we can peek following lines when rows are split
-        for idx in range(start_idx, len(lines)):
-            ln = lines[idx]
-            # stop if we hit a likely footer or blank
-            if ln.lower().startswith('yo,') or ln.lower().startswith('firma'):
-                break
-            m = dni_re.search(ln)
-            if m:
-                student_id = _clean_dni(m.group(0))
-                # look for result in the same line (Apto/No apto/Gai/Ez gai)
-                qualified = None
-                # spanish apto/no apto
-                if re.search(r"\b(apto|no apto|noapto)\b", ln, flags=re.IGNORECASE):
-                    match = re.search(r"\b(no apto|noapto|apto)\b", ln, flags=re.IGNORECASE).group(1)
-                    qualified = _normalize_result(match)
-                else:
-                    # basque variants: allow 'ez-gai', 'ez gai', 'gai'
-                    m_gai = re.search(r"\b(ez[-\s]?gai|gai)\b", ln, flags=re.IGNORECASE)
-                    if m_gai:
-                        qualified = _normalize_result(m_gai.group(1))
-                    else:
-                        # maybe the qualification is in the following 1-2 lines (rows split)
-                        for look_ahead in (1, 2):
-                            next_idx = idx + look_ahead
-                            if next_idx < len(lines):
-                                nxt = lines[next_idx]
-                                # check for gai/ez-gai or apto/no apto in next line
-                                m_gai2 = re.search(r"\b(ez[-\s]?gai|gai)\b", nxt, flags=re.IGNORECASE)
-                                if m_gai2:
-                                    qualified = _normalize_result(m_gai2.group(1))
-                                    break
-                                m_sp = re.search(r"\b(no apto|noapto|apto)\b", nxt, flags=re.IGNORECASE)
-                                if m_sp:
-                                    qualified = _normalize_result(m_sp.group(1))
-                                    break
 
-                participants.append({"student_id": student_id, "qualified": qualified})
+    table_participants: List[Dict] = []
+    # If we found a start index (header), try to locate the page containing it
+    selected_table = None
+    if start_idx is not None and tables_found:
+        # determine which page contains start_idx by walking pages_lines_list
+        cum = 0
+        page_of_header = None
+        for p_idx, plines in enumerate(pages_lines_list):
+            if start_idx >= cum and start_idx < cum + len(plines):
+                page_of_header = p_idx
+                break
+            cum += len(plines)
+
+        # prefer first table on same page, otherwise first table on later pages
+        if page_of_header is not None:
+            for (p_idx, table) in tables_found:
+                if p_idx == page_of_header:
+                    selected_table = table
+                    break
+            if selected_table is None:
+                for (p_idx, table) in tables_found:
+                    if p_idx > page_of_header:
+                        selected_table = table
+                        break
+
+    # if we have a selected table, parse it
+    if selected_table is not None:
+        table_participants = parse_participants_from_table(selected_table)
+
+    if table_participants:
+        participants = table_participants
+    else:
+        if start_idx is not None:
+            participants = parse_participants_from_lines(lines, start_idx)
 
     # assign row_id sequentially starting at 1
     for idx, p in enumerate(participants, start=1):
