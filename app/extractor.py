@@ -60,8 +60,10 @@ def parse_participants_from_lines(lines: List[str], start_idx: int) -> List[Dict
             qualified = None
             m_qual = re.search(r"\b(ez[-\s]?gai|gai|no apto|noapto|apto)\b\s*$", ln, flags=re.IGNORECASE)
             consumed = 0
+            qualified_raw = None
             if m_qual:
-                qualified = _normalize_result(m_qual.group(1))
+                qualified_raw = m_qual.group(0).strip().strip('.,;:')
+                qualified = _normalize_result(qualified_raw)
                 consumed = 1
             else:
                 # Try merging with the next 1-2 lines in case the row was split by linebreaks
@@ -71,11 +73,12 @@ def parse_participants_from_lines(lines: List[str], start_idx: int) -> List[Dict
                         combined = ln + " " + lines[next_idx]
                         m_qual2 = re.search(r"\b(ez[-\s]?gai|gai|no apto|noapto|apto)\b\s*$", combined, flags=re.IGNORECASE)
                         if m_qual2:
-                            qualified = _normalize_result(m_qual2.group(1))
+                            qualified_raw = m_qual2.group(0).strip().strip('.,;:')
+                            qualified = _normalize_result(qualified_raw)
                             consumed = 1 + look_ahead
                             break
 
-            participants.append({"student_id": student_id, "qualified": qualified})
+            participants.append({"student_id": student_id, "qualified": qualified, "qualified_raw": qualified_raw})
             # advance index by number of consumed lines (at least 1)
             if consumed > 0:
                 idx += consumed
@@ -93,89 +96,52 @@ def parse_participants_from_table(table: List[List[str]]) -> List[Dict]:
     """
     participants: List[Dict] = []
 
-    def _is_plausible_dni(tok: str) -> bool:
-        # cleaned token should be 5-12 alphanumeric chars and contain at least one digit
-        if not tok:
-            return False
-        if not re.fullmatch(r"[A-Z0-9]{5,12}", tok):
-            return False
-        if not re.search(r"\d", tok):
-            return False
-        return True
-
-    # Detect header row: look for any cell that looks like 'dni', 'nan', 'nif', 'nie',
-    # or identification variants (Spanish/Euskera). Scan the first few rows.
+    # Strict parsing per user's specification:
+    # - find header column named exactly 'DNI' or 'NANa' (case-insensitive) within first 5 rows
+    # - student_id is taken ONLY from that column; if empty -> skip row
+    # - qualified is taken ONLY from the LAST column of the row
+    participants = []
     header_col_idx = None
     header_row_idx = None
-    if table:
-        max_header_scan = min(5, len(table))
-        header_pattern = re.compile(r"\b(dni|nan|nana|nif|nie|identificaci[oó]n|identifikazio|identifikazioa)\b", flags=re.IGNORECASE)
-        for r in range(max_header_scan):
-            row_lower = [ (cell or "").strip().lower() for cell in table[r] ]
-            for i, cell in enumerate(row_lower):
-                if header_pattern.search(cell):
-                    header_col_idx = i
-                    header_row_idx = r
-                    break
-            if header_col_idx is not None:
+    if not table:
+        return participants
+    max_header_scan = min(5, len(table))
+    header_pattern = re.compile(r"\b(dni|nan|nana)\b", flags=re.IGNORECASE)
+    for r in range(max_header_scan):
+        row_lower = [(cell or "").strip().lower() for cell in table[r]]
+        for i, cell in enumerate(row_lower):
+            if header_pattern.search(cell):
+                header_col_idx = i
+                header_row_idx = r
                 break
+        if header_col_idx is not None:
+            break
 
-    rows_to_process = table
-    # if header detected, skip rows up to and including header_row_idx
-    if header_row_idx is not None:
-        rows_to_process = table[header_row_idx + 1:]
+    # if no DNI/NAN header found, return empty (we expect a well-formed table)
+    if header_col_idx is None:
+        return participants
 
+    # process rows after header row
+    rows_to_process = table[header_row_idx + 1:]
     for row in rows_to_process:
-        # join row for qualification detection, but student_id should come from DNI/NAN column if present
-        row_text = " ".join(cell.strip() for cell in row if cell and cell.strip())
-        if not row_text:
+        # ensure the row has the DNI cell
+        if header_col_idx >= len(row):
+            continue
+        raw_dni = (row[header_col_idx] or "").strip()
+        student_id = _clean_dni(raw_dni)
+        if not student_id:
+            # skip row if DNI cell empty after cleaning
             continue
 
-        student_id = None
-        # prefer value from DNI/NAN column when header present
-        if header_col_idx is not None and header_col_idx < len(row):
-            raw = (row[header_col_idx] or "").strip()
-            student_id = _clean_dni(raw)
-            # if the DNI cell is empty or not plausible, skip the row (do NOT fallback to other columns)
-            if not student_id or not _is_plausible_dni(student_id):
-                continue
+        # qualified comes from the last column
+        if len(row) == 0:
+            qualified = None
         else:
-            # fallback: search any token that looks like a DNI
-            m = dni_re.search(row_text)
-            if m:
-                student_id = _clean_dni(m.group(0))
-            if not student_id:
-                continue
-
-        # find qualification by preferring a qualification cell if header names suggest it
-        qualified = None
-        # try to find a column that looks like a result header (if header exists)
-        qual_cell_text = None
-        if table and header_col_idx is not None:
-            # attempt to find a header cell that looks like 'resultado' or 'calificacion'
-            hdr_row = table[header_row_idx] if header_row_idx is not None else table[0]
-            first_row_lower = [cell.strip().lower() for cell in hdr_row]
-            qual_idx = None
-            for i, h in enumerate(first_row_lower):
-                if any(k in h for k in ("resultado", "calific", "estado", "nota")):
-                    qual_idx = i
-                    break
-            if qual_idx is not None and qual_idx < len(row):
-                qual_cell_text = row[qual_idx]
-
-        # if we didn't get qual from a column, search in joined row text (end of line)
-        if qual_cell_text:
-            m_qual = re.search(r"\b(ez[-\\s]?gai|gai|no apto|noapto|apto)\b\s*$", qual_cell_text, flags=re.IGNORECASE)
-        else:
-            m_qual = re.search(r"\b(ez[-\\s]?gai|gai|no apto|noapto|apto)\b\s*$", row_text, flags=re.IGNORECASE)
-
-        if m_qual:
-            qualified = _normalize_result(m_qual.group(1))
+            qual_raw = (row[-1] or "").strip()
+            qualified = _normalize_result(qual_raw)
 
         participants.append({"student_id": student_id, "qualified": qualified})
     return participants
-
-
 # Module-level permissive DNI token extractor (used by parsing helpers)
 # Accept alphanumeric tokens (and hyphens) of length 5-12 that contain at least one digit.
 dni_re = re.compile(r"\b(?=[A-Za-z0-9-]{5,12}\b)(?=[A-Za-z0-9-]*\d)[A-Za-z0-9-]{5,12}\b")
@@ -327,7 +293,10 @@ def extract_from_pdf(path: str) -> Dict:
         participants = table_participants
     else:
         if start_idx is not None:
-            participants = parse_participants_from_lines(lines, start_idx)
+            # fallback to line-based parsing is kept for debugging only;
+            # commented out in production logic per user request.
+            # participants = parse_participants_from_lines(lines, start_idx)
+            pass
 
     # assign row_id sequentially starting at 1
     for idx, p in enumerate(participants, start=1):
