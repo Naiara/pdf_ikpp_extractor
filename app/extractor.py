@@ -92,16 +92,87 @@ def parse_participants_from_table(table: List[List[str]]) -> List[Dict]:
     the DNI token and qualification (expected at end of the joined row).
     """
     participants: List[Dict] = []
-    for row in table:
+
+    def _is_plausible_dni(tok: str) -> bool:
+        # cleaned token should be 5-12 alphanumeric chars and contain at least one digit
+        if not tok:
+            return False
+        if not re.fullmatch(r"[A-Z0-9]{5,12}", tok):
+            return False
+        if not re.search(r"\d", tok):
+            return False
+        return True
+
+    # Detect header row: look for any cell that looks like 'dni', 'nan', 'nif', 'nie',
+    # or identification variants (Spanish/Euskera). Scan the first few rows.
+    header_col_idx = None
+    header_row_idx = None
+    if table:
+        max_header_scan = min(5, len(table))
+        header_pattern = re.compile(r"\b(dni|nan|nana|nif|nie|identificaci[oó]n|identifikazio|identifikazioa)\b", flags=re.IGNORECASE)
+        for r in range(max_header_scan):
+            row_lower = [ (cell or "").strip().lower() for cell in table[r] ]
+            for i, cell in enumerate(row_lower):
+                if header_pattern.search(cell):
+                    header_col_idx = i
+                    header_row_idx = r
+                    break
+            if header_col_idx is not None:
+                break
+
+    rows_to_process = table
+    # if header detected, skip rows up to and including header_row_idx
+    if header_row_idx is not None:
+        rows_to_process = table[header_row_idx + 1:]
+
+    for row in rows_to_process:
+        # join row for qualification detection, but student_id should come from DNI/NAN column if present
         row_text = " ".join(cell.strip() for cell in row if cell and cell.strip())
         if not row_text:
             continue
-        m = dni_re.search(row_text)
-        if m:
-            student_id = _clean_dni(m.group(0))
-            m_qual = re.search(r"\b(ez[-\s]?gai|gai|no apto|noapto|apto)\b\s*$", row_text, flags=re.IGNORECASE)
-            qualified = _normalize_result(m_qual.group(1)) if m_qual else None
-            participants.append({"student_id": student_id, "qualified": qualified})
+
+        student_id = None
+        # prefer value from DNI/NAN column when header present
+        if header_col_idx is not None and header_col_idx < len(row):
+            raw = (row[header_col_idx] or "").strip()
+            student_id = _clean_dni(raw)
+            # if the DNI cell is empty or not plausible, skip the row (do NOT fallback to other columns)
+            if not student_id or not _is_plausible_dni(student_id):
+                continue
+        else:
+            # fallback: search any token that looks like a DNI
+            m = dni_re.search(row_text)
+            if m:
+                student_id = _clean_dni(m.group(0))
+            if not student_id:
+                continue
+
+        # find qualification by preferring a qualification cell if header names suggest it
+        qualified = None
+        # try to find a column that looks like a result header (if header exists)
+        qual_cell_text = None
+        if table and header_col_idx is not None:
+            # attempt to find a header cell that looks like 'resultado' or 'calificacion'
+            hdr_row = table[header_row_idx] if header_row_idx is not None else table[0]
+            first_row_lower = [cell.strip().lower() for cell in hdr_row]
+            qual_idx = None
+            for i, h in enumerate(first_row_lower):
+                if any(k in h for k in ("resultado", "calific", "estado", "nota")):
+                    qual_idx = i
+                    break
+            if qual_idx is not None and qual_idx < len(row):
+                qual_cell_text = row[qual_idx]
+
+        # if we didn't get qual from a column, search in joined row text (end of line)
+        if qual_cell_text:
+            m_qual = re.search(r"\b(ez[-\\s]?gai|gai|no apto|noapto|apto)\b\s*$", qual_cell_text, flags=re.IGNORECASE)
+        else:
+            m_qual = re.search(r"\b(ez[-\\s]?gai|gai|no apto|noapto|apto)\b\s*$", row_text, flags=re.IGNORECASE)
+
+        if m_qual:
+            qualified = _normalize_result(m_qual.group(1))
+
+        participants.append({"student_id": student_id, "qualified": qualified})
     return participants
 
 
