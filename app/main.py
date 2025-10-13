@@ -7,6 +7,11 @@ from .extractor import extract_from_pdf
 app = FastAPI()
 
 
+@app.get("/health")
+async def health():
+    return {"status": "ok", "version": "1.0"}
+
+
 @app.post("/extract")
 async def extract(file: UploadFile = File(...)):
     if not file.filename.lower().endswith('.pdf'):

@@ -230,9 +230,27 @@ def extract_from_pdf(path: str) -> Dict:
                         selected_table = table
                         break
 
-    # if we have a selected table, parse it
+    # if we have a selected table, parse it and also try to append tables from
+    # subsequent pages when they appear to be a continuation (i.e. parsing them
+    # yields participant rows). This handles tables that span multiple pages.
     if selected_table is not None:
         table_participants = parse_participants_from_table(selected_table)
+        # find the page index of the selected table
+        sel_page_idx = None
+        for p_idx, table in tables_found:
+            if table is selected_table:
+                sel_page_idx = p_idx
+                break
+        # append tables on following pages if they parse to participants
+        if sel_page_idx is not None:
+            for (p_idx, table) in tables_found:
+                if p_idx > sel_page_idx:
+                    parsed_next = parse_participants_from_table(table)
+                    if parsed_next:
+                        table_participants.extend(parsed_next)
+                    else:
+                        # stop at first non-matching table to avoid grabbing unrelated tables
+                        break
 
     if table_participants:
         participants = table_participants
