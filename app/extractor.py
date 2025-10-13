@@ -7,8 +7,10 @@ def _clean_dni(value: str) -> str:
     if not value:
         return ""
     v = value.strip()
-    # remove dots, spaces, hyphens
-    v = re.sub(r"[.\-\s]", "", v)
+    # remove any non-alphanumeric characters (dots, spaces, hyphens, etc.)
+    v = re.sub(r"[^0-9A-Za-z]", "", v)
+    # normalize to uppercase (letters in DNI should be uppercase)
+    v = v.upper()
     return v
 
 
