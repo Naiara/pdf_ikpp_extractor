@@ -88,58 +88,69 @@ def parse_participants_from_lines(lines: List[str], start_idx: int) -> List[Dict
     return participants
 
 
-def parse_participants_from_table(table: List[List[str]]) -> List[Dict]:
-    """Parse participants from a table (list of rows, each row is list of cell texts).
+def detect_dni_header_in_table(table: List[List[str]]) -> Optional[tuple]:
+    """Return (header_col_idx, header_row_idx) if a DNI/NAN header is found.
 
-    Heuristic: join cells with space and treat that as the row text. Then extract
-    the DNI token and qualification (expected at end of the joined row).
+    Scans up to the first 5 rows for a cell that matches 'DNI' or 'NANa' (case-insensitive).
     """
-    participants: List[Dict] = []
-
-    # Strict parsing per user's specification:
-    # - find header column named exactly 'DNI' or 'NANa' (case-insensitive) within first 5 rows
-    # - student_id is taken ONLY from that column; if empty -> skip row
-    # - qualified is taken ONLY from the LAST column of the row
-    participants = []
-    header_col_idx = None
-    header_row_idx = None
     if not table:
-        return participants
+        return None
     max_header_scan = min(5, len(table))
     header_pattern = re.compile(r"\b(dni|nan|nana)\b", flags=re.IGNORECASE)
     for r in range(max_header_scan):
         row_lower = [(cell or "").strip().lower() for cell in table[r]]
         for i, cell in enumerate(row_lower):
             if header_pattern.search(cell):
-                header_col_idx = i
-                header_row_idx = r
-                break
-        if header_col_idx is not None:
-            break
+                return (i, r)
+    return None
 
-    # if no DNI/NAN header found, return empty (we expect a well-formed table)
+
+def parse_participants_from_table(table: List[List[str]], header_col_idx: Optional[int] = None, header_row_idx: Optional[int] = None) -> List[Dict]:
+    """Parse participants from a table using strict rules.
+
+    If header_col_idx/header_row_idx are provided this function will use them
+    (useful for continuation pages). If they are not provided the function will
+    try to detect the header in the table within the first few rows.
+    """
+    participants: List[Dict] = []
+    if not table:
+        return participants
+
+    # Detect header if not supplied
+    detected = None
+    if header_col_idx is None:
+        detected = detect_dni_header_in_table(table)
+        if detected:
+            header_col_idx, header_row_idx = detected
+
+    # If no header column available, we cannot reliably parse
     if header_col_idx is None:
         return participants
 
-    # process rows after header row
-    rows_to_process = table[header_row_idx + 1:]
-    for row in rows_to_process:
-        # ensure the row has the DNI cell
+    # Determine rows to process. If header_row_idx provided skip it; otherwise
+    # check if the first row contains the header label and skip it (common when
+    # pages repeat the header row).
+    rows = table
+    if header_row_idx is not None:
+        rows = table[header_row_idx + 1:]
+    else:
+        # inspect first row's cell at header_col_idx to see if it's a header label
+        first_row = table[0]
+        if header_col_idx < len(first_row):
+            first_cell = (first_row[header_col_idx] or "").strip().lower()
+            if re.search(r"\b(dni|nan|nana)\b", first_cell, flags=re.IGNORECASE):
+                rows = table[1:]
+
+    for row in rows:
         if header_col_idx >= len(row):
             continue
         raw_dni = (row[header_col_idx] or "").strip()
         student_id = _clean_dni(raw_dni)
         if not student_id:
-            # skip row if DNI cell empty after cleaning
+            # skip rows without a DNI in the expected column
             continue
-
-        # qualified comes from the last column
-        if len(row) == 0:
-            qualified = None
-        else:
-            qual_raw = (row[-1] or "").strip()
-            qualified = _normalize_result(qual_raw)
-
+        qual_raw = (row[-1] or "").strip() if row else ""
+        qualified = _normalize_result(qual_raw)
         participants.append({"student_id": student_id, "qualified": qualified})
     return participants
 # Module-level permissive DNI token extractor (used by parsing helpers)
@@ -271,7 +282,14 @@ def extract_from_pdf(path: str) -> Dict:
     # subsequent pages when they appear to be a continuation (i.e. parsing them
     # yields participant rows). This handles tables that span multiple pages.
     if selected_table is not None:
-        table_participants = parse_participants_from_table(selected_table)
+        # detect header column/row on the selected table and use it to parse
+        detected = detect_dni_header_in_table(selected_table)
+        if detected:
+            sel_header_col_idx, sel_header_row_idx = detected
+        else:
+            sel_header_col_idx = None
+            sel_header_row_idx = None
+        table_participants = parse_participants_from_table(selected_table, header_col_idx=sel_header_col_idx, header_row_idx=sel_header_row_idx)
         # find the page index of the selected table
         sel_page_idx = None
         for p_idx, table in tables_found:
@@ -282,7 +300,9 @@ def extract_from_pdf(path: str) -> Dict:
         if sel_page_idx is not None:
             for (p_idx, table) in tables_found:
                 if p_idx > sel_page_idx:
-                    parsed_next = parse_participants_from_table(table)
+                    # treat subsequent tables as continuation pages: pass the
+                    # header_col_idx so repeated or missing headers are handled
+                    parsed_next = parse_participants_from_table(table, header_col_idx=sel_header_col_idx, header_row_idx=None)
                     if parsed_next:
                         table_participants.extend(parsed_next)
                     else:
