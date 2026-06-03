@@ -46,8 +46,8 @@ Sample JSON output (fields renamed):
 	"school_id": "0976431",
 	"course_name": "N8N HASTAPENAK",
 	"participants": [
-		{"row_id": 1, "student_id": "62949881P", "qualified": true},
-		{"row_id": 2, "student_id": "19517997J", "qualified": true}
+		{"row_id": 1, "student_id": "11112222P", "qualified": true},
+		{"row_id": 2, "student_id": "33334444J", "qualified": true}
 	]
 }
 ```
